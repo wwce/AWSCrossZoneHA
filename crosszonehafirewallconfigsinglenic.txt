@@ -1,0 +1,86 @@
+Prequisites
++++_VPC_ID_+++
++++_VPC_CIDR_+++
++++_SECOND_IP_OF_VPC_CIDR_+++
++++_YOUR_API_GATEWAY_HOST__+++
++++_First_IP_of_Trust_subnet_+++
++++_Lambda1_CIDR_+++
++++_Lambda2_CIDR_+++
+Fw Trust IPs
+Fw ETH1 ETH2 ENIs
+
+set mgt-config users admin password
+set deviceconfig system hostname +++_Firewall_Name_+++
+commit 
+
+configure
+set deviceconfig system dns-setting servers primary +++_SECOND_IP_OF_VPC_CIDR_+++
+
+set network interface ethernet ethernet1/1 layer3 dhcp-client create-default-route yes enable yes 
+set network interface loopback ip 1.1.1.2/32
+
+set zone trust network layer3 ethernet1/1
+set zone trust network layer3 loopback
+set network virtual-router default interface ethernet1/1
+set network virtual-router default interface loopback
+
+set network profiles interface-management-profile httpmgmt http yes 
+set network interface loopback interface-management-profile httpmgmt 
+commit
+
+
+set address pathcheckfqdn fqdn 1.1.1.2
+set address trustip ip-netmask +++_LOCAL_TRUST_IP_+++
+set address peertrustip ip-netmask +++_PEER_TRUST_IP_+++
+set address lambdasn1 ip-netmask +++_Lambda1_CIDR_+++
+set address lambdasn2 ip-netmask +++_Lambda2_CIDR_+++
+set address pingprobedst ip-netmask +++_First_IP_of_Trust_subnet_+++
+
+set rulebase security rules allowping from any to any source peertrustip destination any application ping action allow service application-default 
+set rulebase security rules allowpathcheck from any source lambdasn1 service service-http to any application any action allow destination any 
+set rulebase security rules allowpathcheck from any source lambdasn2 service service-http to any application any action allow destination any 
+move rulebase security rules allowping top
+move rulebase security rules allowpathcheck after allowping
+
+set rulebase nat rules pingnat source peertrustip service any destination any to trust dynamic-destination-translation translated-address pingprobedst distribution round-robin 
+set rulebase nat rules pingnat from any source-translation dynamic-ip-and-port interface-address interface ethernet1/1 
+
+set rulebase nat rules pathchecknat source lambdasn1 from any service service-http destination trustip 
+set rulebase nat rules pathchecknat source lambdasn2 to trust dynamic-destination-translation translated-address pathcheckfqdn
+
+commit
+
+set network virtual-router default routing-table ip static-route "Monitor" nexthop ip-address +++_FirstIPofTrustSubnet_+++
+set network virtual-router default routing-table ip static-route "Monitor" interface ethernet1/1
+set network virtual-router default routing-table ip static-route "Monitor" path-monitor monitor-destinations "Internal" enable yes
+set network virtual-router default routing-table ip static-route "Monitor" path-monitor monitor-destinations "Internal" source DHCP
+set network virtual-router default routing-table ip static-route "Monitor" path-monitor monitor-destinations "Internal" destination +++_PEER_TRUST_IP_+++
+set network virtual-router default routing-table ip static-route "Monitor" path-monitor monitor-destinations "Internal" interval 3
+set network virtual-router default routing-table ip static-route "Monitor" path-monitor monitor-destinations "Internal" count 5
+set network virtual-router default routing-table ip static-route "Monitor" path-monitor enable yes
+set network virtual-router default routing-table ip static-route "Monitor" path-monitor failure-condition any
+set network virtual-router default routing-table ip static-route "Monitor" path-monitor hold-time 0
+set network virtual-router default routing-table ip static-route "Monitor" bfd profile None
+set network virtual-router default routing-table ip static-route "Monitor" metric 10
+set network virtual-router default routing-table ip static-route "Monitor" destination 1.1.1.1/32
+set network virtual-router default routing-table ip static-route "Monitor" route-table unicast 
+
+set shared log-settings http AWS_HA_Down server AWS-API-Gateway address +++_YOUR_API_GATEWAY_HOST__+++
+set shared log-settings http AWS_HA_Down server AWS-API-Gateway http-method POST
+set shared log-settings http AWS_HA_Down server AWS-API-Gateway protocol HTTPS
+set shared log-settings http AWS_HA_Down server AWS-API-Gateway port 443
+
+set shared log-settings http AWS_HA_Down format system name "AWS HA Down"
+set shared log-settings http AWS_HA_Down format system url-format /prod/xzoneha/
+set shared log-settings http AWS_HA_Down format system headers Content-Type value application/json
+
+set shared log-settings http AWS_HA_Down format system params trustdead value +++_peerfirewall_trust_ENI_+++
+set shared log-settings http AWS_HA_Down format system params trustgood value +++_localFW_trust_ENI_+++
+set shared log-settings http AWS_HA_Down format system params vpcid value +++_VPC_ID_+++
+
+set shared log-settings http AWS_HA_Down format system payload $serial
+
+set shared log-settings system match-list HA_Down send-http AWS_HA_Down
+set shared log-settings system match-list HA_Down filter "( severity eq critical ) and ( eventid eq path-monitor-failure ) and ( description contains '1.1.1.1/32')"
+
+commit

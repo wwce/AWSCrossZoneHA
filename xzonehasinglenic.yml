@@ -1,0 +1,353 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  Cloudformation Template to add API Gateway, Lambda and Palo Alto Networks NGFW
+  components to support Cross Zone HA
+Metadata: {}
+Parameters:
+  S3Bucket:
+    Description: S3 Bucket containing Lambda service code
+    Type: String
+  S3Key:
+    Description: S3 Zip file containg Lambda service code
+    Type: String
+  LambdaSubnetIDs:
+    Description: Choose 2 Lambda/ApiGW Subnet IDs
+    Type: 'List<AWS::EC2::Subnet::Id>'
+  LambdaSecurityID:
+    Description: Choose the lambda/ApiGW security group
+    Type: 'List<AWS::EC2::SecurityGroup::Id>'
+  VPCID:
+    Description: Choose the VPC
+    Type: 'AWS::EC2::VPC::Id'
+  FW0TrustSubnet:
+    Description: Choose the first FW Trust Subnet
+    Type: 'AWS::EC2::Subnet::Id'
+  FW0MgmtSubnet:
+    Description: Choose the first FW Management Subnet
+    Type: 'AWS::EC2::Subnet::Id'
+  FW1TrustSubnet:
+    Description: Choose the second FW Trust Subnet
+    Type: 'AWS::EC2::Subnet::Id'
+  FW1MgmtSubnet:
+    Description: Choose the second FW Management Subnet
+    Type: 'AWS::EC2::Subnet::Id'
+  FirewallAMI:
+    Description: Input the firewall AMI ID. https://docs.paloaltonetworks.com/compatibility-matrix/vm-series-firewalls/aws-cft-amazon-machine-images-ami-list
+    Type: 'AWS::EC2::Image::Id'
+  KeyName:
+    Description: Amazon EC2 Key Pair
+    Type: AWS::EC2::KeyPair::KeyName
+  FWInstanceType:
+    Type: String
+    AllowedValues:
+      - c5.xlarge
+      - c5.2xlarge
+      - c5.4xlarge
+      - c5.9xlarge
+      - c5.18xlarge
+      - c4.xlarge
+      - c4.2xlarge
+      - c4.4xlarge
+      - c4.8xlarge
+      - m3.xlarge
+      - m3.2xlarge
+      - m4.xlarge
+      - m4.2xlarge
+      - m4.4xlarge    
+Mappings: {}
+Conditions: {}
+Resources:
+  APIEndpoint:
+    Type: 'AWS::EC2::VPCEndpoint'
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action:
+              - '*'
+            Resource:
+              - '*'
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.execute-api'
+      SubnetIds: !Ref LambdaSubnetIDs
+      SecurityGroupIds: !Ref LambdaSecurityID
+      PrivateDnsEnabled: true
+      VpcEndpointType: Interface
+      VpcId: !Ref VPCID
+  XZoneRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Path: /
+      RoleName: !Join 
+        - '-'
+        - - XZoneHARole
+          - !Ref 'AWS::StackName'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole'
+      Policies:
+        - PolicyName: !Join 
+            - '-'
+            - - XZoneHAPol
+              - !Ref 'AWS::StackName'
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'ec2:CreateRoute'
+                  - 'ec2:DeleteRoute'
+                  - 'logs:*'
+                  - 'ec2:DescribeRouteTables'
+                  - 'ec2:ReplaceRoute'
+                  - 'ec2:AssociateRouteTable'
+                  - 'ec2:DescribeSecurityGroups'
+                  - 'ec2:DescribeSubnets'
+                  - 'ec2:DescribeVpcs'
+                Resource:
+                  - '*'
+  XZoneLambda:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      FunctionName: !Join 
+        - '-'
+        - - XZoneHALambda
+          - !Ref 'AWS::StackName'
+      Code:
+        S3Bucket: !Ref S3Bucket
+        S3Key: !Ref S3Key
+      Description: XZoneHA for Palo Alto Networks virtual firewalls
+      Handler: crosszonehawithpathchecksinglenic.lambda_handler
+      Role: !GetAtt 
+        - XZoneRole
+        - Arn
+      Runtime: python3.8
+      Timeout: 30
+      VpcConfig:
+        SecurityGroupIds: !Ref LambdaSecurityID
+        SubnetIds: !Ref LambdaSubnetIDs   
+  XZoneLambdaPerm:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt XZoneLambda.Arn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 
+        - 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiID}/*'
+        - { ApiID : !Ref XZoneHaApi }
+  XZoneHaApi:
+    Type: 'AWS::ApiGateway::RestApi'
+    Properties:
+      EndpointConfiguration:
+        Types:
+          - PRIVATE
+        VpcEndpointIds:
+          - !Ref APIEndpoint
+      Name: !Join 
+        - '-'
+        - - APIGW
+          - !Ref 'AWS::StackName'
+      Description: Used to trigged failover lambda
+      Policy:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action: 'execute-api:Invoke'
+            Resource: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:*/*'
+          - Effect: Deny
+            Principal: '*'
+            Action: 'execute-api:Invoke'
+            Resource: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:*/*'
+            Condition:
+              StringNotEquals:
+                'aws:SourceVpce': !Ref APIEndpoint
+      FailOnWarnings: true
+  XZoneHaRes:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      RestApiId: !Ref XZoneHaApi
+      ParentId: !GetAtt 
+        - XZoneHaApi
+        - RootResourceId
+      PathPart: xzoneha
+  ApiPostMethod:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      RestApiId: !Ref XZoneHaApi
+      ResourceId: !Ref XZoneHaRes
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS
+        IntegrationHttpMethod: POST
+        PassthroughBehavior: WHEN_NO_TEMPLATES
+        Uri: !Join 
+          - ''
+          - - 'arn:aws:apigateway:'
+            - !Ref 'AWS::Region'
+            - ':lambda:path/2015-03-31/functions/'
+            - !GetAtt 
+              - XZoneLambda
+              - Arn
+            - /invocations
+        RequestTemplates:
+          application/json: !Join 
+            - ''
+            - - |
+                {
+                  "vpcid" : "$input.params('vpcid')",
+              - |2
+                  "trustdead" : "$input.params('trustdead')",
+              - |2
+                  "trustgood" : "$input.params('trustgood')"
+                }
+        IntegrationResponses:
+          - StatusCode: '200'
+      RequestParameters:
+        method.request.querystring.vpcid: false
+        method.request.querystring.trustdead: false
+        method.request.querystring.trustgood: false
+      MethodResponses:
+        - StatusCode: '200'
+          ResponseModels:
+            application/json: Empty
+  ApiDeployment:
+    Type: 'AWS::ApiGateway::Deployment'
+    DependsOn:
+      - ApiPostMethod
+    Properties:
+      RestApiId: !Ref XZoneHaApi
+  XZoneApiStage:
+    Type: 'AWS::ApiGateway::Stage'
+    Properties:
+      DeploymentId: !Ref ApiDeployment
+      RestApiId: !Ref XZoneHaApi
+      StageName: prod
+  FW0ManagementNetworkInterface:
+    Type: AWS::EC2::NetworkInterface
+    Properties:
+      Description: AWS FW0 MGMT
+      SubnetId: !Ref 'FW0MgmtSubnet'
+      SourceDestCheck: true
+      Tags:
+        - Key: Name
+          Value: !Join
+            - '-'
+            - - !Ref 'AWS::StackName'
+              - AWSFW0Mgt
+  FW1ManagementNetworkInterface:
+    Type: AWS::EC2::NetworkInterface
+    Properties:
+      Description: AWS FW1 MGMT
+      SubnetId: !Ref 'FW1MgmtSubnet'
+      SourceDestCheck: true
+      Tags:
+        - Key: Name
+          Value: !Join
+            - '-'
+            - - !Ref 'AWS::StackName'
+              - AWSFW1Mgt
+  FW0TrustNetworkInterface:
+    Type: AWS::EC2::NetworkInterface
+    Properties:
+      Description: AWS FW0 Trust
+      SubnetId: !Ref 'FW0TrustSubnet'
+      SourceDestCheck: false
+      Tags:
+        - Key: Name
+          Value: !Join
+            - '-'
+            - - !Ref 'AWS::StackName'
+              - AWSFW0Trust
+  FW1TrustNetworkInterface:
+    Type: AWS::EC2::NetworkInterface
+    Properties:
+      Description: AWS FW1 Trust
+      SubnetId: !Ref 'FW1TrustSubnet'
+      SourceDestCheck: false
+      Tags:
+        - Key: Name
+          Value: !Join
+            - '-'
+            - - !Ref 'AWS::StackName'
+              - AWSFW1Trust
+  FW0Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      DisableApiTermination: false
+      InstanceInitiatedShutdownBehavior: stop
+      EbsOptimized: true
+      ImageId: !Ref 'FirewallAMI'
+      InstanceType: !Ref 'FWInstanceType'
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp2
+            DeleteOnTermination: true
+            VolumeSize: 60
+      KeyName: !Ref 'KeyName'
+      Monitoring: false
+      Tags:
+        - Key: Name
+          Value: !Join
+            - '-'
+            - - !Ref 'AWS::StackName'
+              - FW0
+      NetworkInterfaces:
+        - NetworkInterfaceId: !Ref 'FW0ManagementNetworkInterface'
+          DeviceIndex: '0'
+        - NetworkInterfaceId: !Ref 'FW0TrustNetworkInterface'
+          DeviceIndex: '1'
+  FW1Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      DisableApiTermination: false
+      InstanceInitiatedShutdownBehavior: stop
+      EbsOptimized: true
+      ImageId: !Ref 'FirewallAMI'
+      InstanceType: !Ref 'FWInstanceType'
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeType: gp2
+            DeleteOnTermination: true
+            VolumeSize: 60
+      KeyName: !Ref 'KeyName'
+      Monitoring: false
+      Tags:
+        - Key: Name
+          Value: !Join
+            - '-'
+            - - !Ref 'AWS::StackName'
+              - FW1
+      NetworkInterfaces:
+        - NetworkInterfaceId: !Ref 'FW1ManagementNetworkInterface'
+          DeviceIndex: '0'
+        - NetworkInterfaceId: !Ref 'FW1TrustNetworkInterface'
+          DeviceIndex: '1'
+Outputs: 
+  ApiGwUrl:
+    Description: URL of the API Gateway
+    Value: !Join [ "", [ "https://", !Ref "XZoneHaApi", ".execute-api.", !Ref "AWS::Region", ".amazonaws.com/prod/xzoneha"]]
+  FW0TrustENI:
+    Description: ENI of Firewall 0 Trust
+    Value: !Ref "FW0TrustNetworkInterface"
+  FW1TrustENI:
+    Description: ENI of Firewall 1 Trust
+    Value: !Ref "FW1TrustNetworkInterface"
+  Fw0TrustIP:
+    Description: Private IP of Firewall 0 Trust  
+    Value: !GetAtt [FW0TrustNetworkInterface, PrimaryPrivateIpAddress] 
+  Fw1TrustIP:
+    Description: Private IP of Firewall 1
+    Value: !GetAtt [FW1TrustNetworkInterface, PrimaryPrivateIpAddress] 
+
+
