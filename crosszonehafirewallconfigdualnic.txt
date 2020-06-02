@@ -76,7 +76,7 @@ set shared log-settings http AWS_HA_Down format system headers Content-Type valu
 set shared log-settings http AWS_HA_Down format system params trustdead value XXX_peerfirewall_trust_ENI_XXX
 set shared log-settings http AWS_HA_Down format system params trustgood value XXX_localFW_trust_ENI_XXX
 set shared log-settings http AWS_HA_Down format system params untrustdead value XXX_peerfirewall_untrust_ENI_XXX
-set shared log-settings http AWS_HA_Down format system params untrustgood value XXX_localFW_trust_ENI_XXX
+set shared log-settings http AWS_HA_Down format system params untrustgood value XXX_localFW_untrust_ENI_XXX
 set shared log-settings http AWS_HA_Down format system params vpcid value XXX_VPC_ID_XXX
 
 set shared log-settings http AWS_HA_Down format system payload $serial
