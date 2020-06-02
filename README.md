@@ -50,8 +50,8 @@ Download the YAML file corresponding to your deployment model and launch a Cloud
 - KeyName
 - Security Group Assigned to API Gateway and Lambda endpoints
 - Zone redundant Subnets for the API Gateway and Lambda endpoints.  
-  + Both endpoints reside in the same subnets.
-  + Subnets should a 0.0.0.0/0 pointing to a Nat Gateway.
+  + Both endpoints can reside in the same subnets.
+  + Subnets should have a 0.0.0.0/0 route pointing to a Nat Gateway.
 - S3Bucket (Used to store the lambda function code contained in a zip file)
 - S3Key (Name of the zip file)
 - VPCID
